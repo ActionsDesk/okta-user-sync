@@ -1,0 +1,22 @@
+{
+  "name": "user-sync-okta",
+  "version": "1.0.0",
+  "private": true,
+  "description": "GitHub Action to reconcile GitHub Enterprise membership against Okta groups.",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc --noEmit && ncc build src/main.ts -o dist --source-map --license licenses.txt",
+    "lint": "tsc --noEmit",
+    "package": "ncc build src/main.ts -o dist --source-map --license licenses.txt",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@actions/core": "^3.0.1",
+    "undici": "^8.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.2",
+    "@vercel/ncc": "^0.38.4",
+    "typescript": "^6.0.3"
+  }
+}

@@ -1,0 +1,40 @@
+name: Okta to GitHub Enterprise User Sync
+description: Removes GitHub Enterprise members whose verified domain emails are not present in the configured Okta groups.
+author: lindluni
+branding:
+  icon: user-x
+  color: orange
+inputs:
+  enterprise:
+    description: GitHub Enterprise slug (e.g. "my-enterprise").
+    required: true
+  github-token:
+    description: GitHub token with enterprise:admin scope (PAT or app token).
+    required: true
+  okta-domain:
+    description: Okta domain, e.g. "example.okta.com" (no scheme).
+    required: true
+  okta-token:
+    description: Okta API token used to list group members.
+    required: true
+  okta-groups:
+    description: Newline- or comma-separated list of Okta group IDs whose members are the source of truth.
+    required: true
+  dry-run:
+    description: If "true" (default), report removals without performing them.
+    required: false
+    default: "true"
+  email-domain-filter:
+    description: Optional comma-separated list of email domains to consider when matching (others are ignored).
+    required: false
+    default: ""
+outputs:
+  removed-count:
+    description: Number of users removed (or that would be removed in dry-run).
+  removed-logins:
+    description: JSON array of GitHub logins that were removed (or would be).
+  drift-spared-logins:
+    description: JSON array of GitHub logins spared from removal because a re-check found them in Okta.
+runs:
+  using: node20
+  main: dist/index.js
