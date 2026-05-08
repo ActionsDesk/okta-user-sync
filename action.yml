@@ -36,5 +36,5 @@ outputs:
   drift-spared-logins:
     description: JSON array of GitHub logins spared from removal because a re-check found them in Okta.
 runs:
-  using: node20
+  using: node24
   main: dist/index.js
