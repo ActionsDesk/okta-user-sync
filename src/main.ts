@@ -20,18 +20,15 @@ async function run(): Promise<void> {
     const githubToken = core.getInput("github-token", { required: true });
     const oktaDomain = core.getInput("okta-domain", { required: true });
     const oktaToken = core.getInput("okta-token", { required: true });
-    const oktaGroupsRaw = core.getInput("okta-groups", { required: true });
+    const oktaAppId = core.getInput("okta-app-id", { required: true });
     const dryRun = (core.getInput("dry-run") || "true").toLowerCase() !== "false";
     const domainFilter = new Set(
       parseList(core.getInput("email-domain-filter") || "").map((s) => s.toLowerCase())
     );
 
-    const oktaGroups = parseList(oktaGroupsRaw);
-    if (oktaGroups.length === 0) throw new Error("okta-groups input is empty");
-
     core.info(`Mode: ${dryRun ? "DRY-RUN" : "ENFORCE"}`);
     core.info(`Enterprise: ${enterprise}`);
-    core.info(`Okta groups: ${oktaGroups.join(", ")}`);
+    core.info(`Okta app: ${oktaAppId}`);
     if (domainFilter.size > 0) {
       core.info(`Email domain filter: ${[...domainFilter].join(", ")}`);
     }
@@ -39,9 +36,10 @@ async function run(): Promise<void> {
     const github = new GitHubClient(githubToken);
     const okta = new OktaClient(oktaDomain, oktaToken);
 
-    core.startGroup("Fetching Okta group members");
-    const { emails: oktaEmails, perGroup } = await okta.collectEmails(oktaGroups);
-    for (const [g, n] of perGroup) core.info(`  group ${g}: ${n} members`);
+    core.startGroup("Fetching Okta app assignments");
+    const appUsers = await okta.listAppUsers(oktaAppId);
+    const oktaEmails = okta.collectEmails(appUsers);
+    core.info(`App-assigned users: ${appUsers.length}`);
     core.info(`Total unique Okta emails: ${oktaEmails.size}`);
     core.endGroup();
 
@@ -107,12 +105,11 @@ async function run(): Promise<void> {
     const removed: string[] = [];
     const driftSpared: string[] = [];
     if (toRemove.length > 0 && !dryRun) {
-      core.startGroup("Drift protection: re-fetching Okta snapshot before removals");
-      const refreshed = await okta.collectEmails(oktaGroups);
-      core.info(`Refreshed Okta unique emails: ${refreshed.emails.size}`);
+      core.startGroup("Drift protection: re-fetching Okta app assignments before removals");
+      const refreshedAppUsers = await okta.listAppUsers(oktaAppId);
+      const refreshedEmails = okta.collectEmails(refreshedAppUsers);
+      core.info(`Refreshed Okta unique emails: ${refreshedEmails.size}`);
       core.endGroup();
-
-      const groupIdSet = new Set(oktaGroups);
 
       core.startGroup("Removing users from enterprise");
       const enterpriseId = await github.getEnterpriseId(enterprise);
@@ -126,17 +123,16 @@ async function run(): Promise<void> {
             ? verified.filter((e) => domainFilter.has(emailDomain(e)))
             : verified;
 
-        if (filtered.some((e) => refreshed.emails.has(e))) {
+        if (filtered.some((e) => refreshedEmails.has(e))) {
           driftSpared.push(login);
-          core.info(`Skipping ${login}: appeared in refreshed Okta snapshot`);
+          core.info(`Skipping ${login}: appeared in refreshed Okta app snapshot`);
           continue;
         }
 
         try {
-          const stillMissing = !(await okta.isInAnyGroup(filtered, groupIdSet));
-          if (!stillMissing) {
+          if (await okta.hasAnyEmailAssignedToApp(oktaAppId, filtered)) {
             driftSpared.push(login);
-            core.info(`Skipping ${login}: per-user Okta re-check found group membership`);
+            core.info(`Skipping ${login}: per-user Okta re-check found app assignment`);
             continue;
           }
         } catch (err) {
@@ -184,6 +180,8 @@ async function run(): Promise<void> {
       .addRaw(`Mode: **${dryRun ? "DRY-RUN" : "ENFORCE"}**`)
       .addBreak()
       .addRaw(`Enterprise: \`${enterprise}\``)
+      .addBreak()
+      .addRaw(`Okta app: \`${oktaAppId}\``)
       .addBreak()
       .addRaw(`Okta unique emails: **${oktaEmails.size}**`)
       .addBreak()

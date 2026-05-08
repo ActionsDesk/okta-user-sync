@@ -68328,20 +68328,20 @@ class OktaClient {
         this.baseUrl = `https://${cleaned}`;
         this.token = token;
     }
-    async listGroupMembers(groupId) {
+    headers() {
+        return {
+            accept: "application/json",
+            authorization: `SSWS ${this.token}`,
+        };
+    }
+    async listAppUsers(appId) {
         const users = [];
-        let url = `${this.baseUrl}/api/v1/groups/${encodeURIComponent(groupId)}/users?limit=200`;
+        let url = `${this.baseUrl}/api/v1/apps/${encodeURIComponent(appId)}/users?limit=500`;
         while (url) {
-            const res = await (0,node_modules_undici/* request */.Em)(url, {
-                method: "GET",
-                headers: {
-                    accept: "application/json",
-                    authorization: `SSWS ${this.token}`,
-                },
-            });
+            const res = await (0,node_modules_undici/* request */.Em)(url, { method: "GET", headers: this.headers() });
             if (res.statusCode < 200 || res.statusCode >= 300) {
                 const body = await res.body.text();
-                throw new Error(`Okta API error ${res.statusCode} for group ${groupId}: ${body.slice(0, 500)}`);
+                throw new Error(`Okta API error ${res.statusCode} listing app ${appId} users: ${body.slice(0, 500)}`);
             }
             const batch = (await res.body.json());
             users.push(...batch);
@@ -68349,16 +68349,29 @@ class OktaClient {
         }
         return users;
     }
-    async findUserByEmail(email) {
+    collectEmails(users) {
+        const emails = new Set();
+        for (const u of users) {
+            if (u.status && u.status.toUpperCase() === "DEPROVISIONED")
+                continue;
+            const candidates = [
+                u.profile?.email,
+                u.profile?.userName,
+                u.profile?.login,
+                u.profile?.secondEmail,
+                u.credentials?.userName,
+            ];
+            for (const e of candidates) {
+                if (e && e.includes("@"))
+                    emails.add(e.trim().toLowerCase());
+            }
+        }
+        return emails;
+    }
+    async findUserIdByEmail(email) {
         const search = `profile.email eq "${email}" or profile.login eq "${email}" or profile.secondEmail eq "${email}"`;
         const url = `${this.baseUrl}/api/v1/users?limit=1&search=${encodeURIComponent(search)}`;
-        const res = await (0,node_modules_undici/* request */.Em)(url, {
-            method: "GET",
-            headers: {
-                accept: "application/json",
-                authorization: `SSWS ${this.token}`,
-            },
-        });
+        const res = await (0,node_modules_undici/* request */.Em)(url, { method: "GET", headers: this.headers() });
         if (res.statusCode === 404)
             return null;
         if (res.statusCode < 200 || res.statusCode >= 300) {
@@ -68366,53 +68379,36 @@ class OktaClient {
             throw new Error(`Okta search error ${res.statusCode}: ${body.slice(0, 500)}`);
         }
         const users = (await res.body.json());
-        return users[0] ?? null;
+        const user = users[0];
+        if (!user)
+            return null;
+        if (user.status && user.status.toUpperCase() === "DEPROVISIONED")
+            return null;
+        return user.id;
     }
-    async listUserGroups(userId) {
-        const url = `${this.baseUrl}/api/v1/users/${encodeURIComponent(userId)}/groups`;
-        const res = await (0,node_modules_undici/* request */.Em)(url, {
-            method: "GET",
-            headers: {
-                accept: "application/json",
-                authorization: `SSWS ${this.token}`,
-            },
-        });
+    async isUserAssignedToApp(appId, userId) {
+        const url = `${this.baseUrl}/api/v1/apps/${encodeURIComponent(appId)}/users/${encodeURIComponent(userId)}`;
+        const res = await (0,node_modules_undici/* request */.Em)(url, { method: "GET", headers: this.headers() });
+        if (res.statusCode === 404)
+            return false;
         if (res.statusCode < 200 || res.statusCode >= 300) {
             const body = await res.body.text();
-            throw new Error(`Okta listUserGroups error ${res.statusCode}: ${body.slice(0, 500)}`);
+            throw new Error(`Okta app-user check error ${res.statusCode} for ${userId}: ${body.slice(0, 500)}`);
         }
-        return (await res.body.json());
+        const appUser = (await res.body.json());
+        if (appUser.status && appUser.status.toUpperCase() === "DEPROVISIONED")
+            return false;
+        return true;
     }
-    async isInAnyGroup(emails, groupIds) {
+    async hasAnyEmailAssignedToApp(appId, emails) {
         for (const email of emails) {
-            const user = await this.findUserByEmail(email);
-            if (!user)
+            const userId = await this.findUserIdByEmail(email);
+            if (!userId)
                 continue;
-            if (user.status && user.status.toUpperCase() === "DEPROVISIONED")
-                continue;
-            const groups = await this.listUserGroups(user.id);
-            if (groups.some((g) => groupIds.has(g.id)))
+            if (await this.isUserAssignedToApp(appId, userId))
                 return true;
         }
         return false;
-    }
-    async collectEmails(groupIds) {
-        const emails = new Set();
-        const perGroup = new Map();
-        for (const groupId of groupIds) {
-            const members = await this.listGroupMembers(groupId);
-            perGroup.set(groupId, members.length);
-            for (const u of members) {
-                if (u.status && u.status.toUpperCase() === "DEPROVISIONED")
-                    continue;
-                const candidates = [u.profile?.email, u.profile?.login, u.profile?.secondEmail];
-                for (const e of candidates) {
-                    if (e && e.includes("@"))
-                        emails.add(e.trim().toLowerCase());
-                }
-            }
-        }
-        return { emails, perGroup };
     }
 }
 
@@ -68436,24 +68432,21 @@ async function run() {
         const githubToken = getInput("github-token", { required: true });
         const oktaDomain = getInput("okta-domain", { required: true });
         const oktaToken = getInput("okta-token", { required: true });
-        const oktaGroupsRaw = getInput("okta-groups", { required: true });
+        const oktaAppId = getInput("okta-app-id", { required: true });
         const dryRun = (getInput("dry-run") || "true").toLowerCase() !== "false";
         const domainFilter = new Set(parseList(getInput("email-domain-filter") || "").map((s) => s.toLowerCase()));
-        const oktaGroups = parseList(oktaGroupsRaw);
-        if (oktaGroups.length === 0)
-            throw new Error("okta-groups input is empty");
         info(`Mode: ${dryRun ? "DRY-RUN" : "ENFORCE"}`);
         info(`Enterprise: ${enterprise}`);
-        info(`Okta groups: ${oktaGroups.join(", ")}`);
+        info(`Okta app: ${oktaAppId}`);
         if (domainFilter.size > 0) {
             info(`Email domain filter: ${[...domainFilter].join(", ")}`);
         }
         const github = new GitHubClient(githubToken);
         const okta = new OktaClient(oktaDomain, oktaToken);
-        startGroup("Fetching Okta group members");
-        const { emails: oktaEmails, perGroup } = await okta.collectEmails(oktaGroups);
-        for (const [g, n] of perGroup)
-            info(`  group ${g}: ${n} members`);
+        startGroup("Fetching Okta app assignments");
+        const appUsers = await okta.listAppUsers(oktaAppId);
+        const oktaEmails = okta.collectEmails(appUsers);
+        info(`App-assigned users: ${appUsers.length}`);
         info(`Total unique Okta emails: ${oktaEmails.size}`);
         endGroup();
         startGroup("Fetching GitHub enterprise consumed licenses");
@@ -68502,11 +68495,11 @@ async function run() {
         const removed = [];
         const driftSpared = [];
         if (toRemove.length > 0 && !dryRun) {
-            startGroup("Drift protection: re-fetching Okta snapshot before removals");
-            const refreshed = await okta.collectEmails(oktaGroups);
-            info(`Refreshed Okta unique emails: ${refreshed.emails.size}`);
+            startGroup("Drift protection: re-fetching Okta app assignments before removals");
+            const refreshedAppUsers = await okta.listAppUsers(oktaAppId);
+            const refreshedEmails = okta.collectEmails(refreshedAppUsers);
+            info(`Refreshed Okta unique emails: ${refreshedEmails.size}`);
             endGroup();
-            const groupIdSet = new Set(oktaGroups);
             startGroup("Removing users from enterprise");
             const enterpriseId = await github.getEnterpriseId(enterprise);
             for (const u of toRemove) {
@@ -68515,16 +68508,15 @@ async function run() {
                 const filtered = domainFilter.size > 0
                     ? verified.filter((e) => domainFilter.has(emailDomain(e)))
                     : verified;
-                if (filtered.some((e) => refreshed.emails.has(e))) {
+                if (filtered.some((e) => refreshedEmails.has(e))) {
                     driftSpared.push(login);
-                    info(`Skipping ${login}: appeared in refreshed Okta snapshot`);
+                    info(`Skipping ${login}: appeared in refreshed Okta app snapshot`);
                     continue;
                 }
                 try {
-                    const stillMissing = !(await okta.isInAnyGroup(filtered, groupIdSet));
-                    if (!stillMissing) {
+                    if (await okta.hasAnyEmailAssignedToApp(oktaAppId, filtered)) {
                         driftSpared.push(login);
-                        info(`Skipping ${login}: per-user Okta re-check found group membership`);
+                        info(`Skipping ${login}: per-user Okta re-check found app assignment`);
                         continue;
                     }
                 }
@@ -68565,6 +68557,8 @@ async function run() {
             .addRaw(`Mode: **${dryRun ? "DRY-RUN" : "ENFORCE"}**`)
             .addBreak()
             .addRaw(`Enterprise: \`${enterprise}\``)
+            .addBreak()
+            .addRaw(`Okta app: \`${oktaAppId}\``)
             .addBreak()
             .addRaw(`Okta unique emails: **${oktaEmails.size}**`)
             .addBreak()

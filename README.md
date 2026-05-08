@@ -1,6 +1,6 @@
 # user-sync-okta
 
-GitHub Action that reconciles GitHub Enterprise membership against one or more Okta groups. Any enterprise member whose verified domain email is **not** present in any of the configured Okta groups is removed from the enterprise via the GraphQL `removeEnterpriseMember` mutation.
+GitHub Action that reconciles GitHub Enterprise membership against the assignments of a single Okta application. Any enterprise member whose verified domain email is **not** present in the Okta app's user list is removed from the enterprise via the GraphQL `removeEnterpriseMember` mutation.
 
 Matching is performed on lowercased email addresses from the `github_com_verified_domain_emails` field returned by [`GET /enterprises/{enterprise}/consumed-licenses`](https://docs.github.com/en/enterprise-cloud@latest/rest/enterprise-admin/licensing?apiVersion=2026-03-10#list-enterprise-consumed-licenses) (REST API version `2026-03-10`).
 
@@ -11,8 +11,8 @@ Matching is performed on lowercased email addresses from the `github_com_verifie
 | `enterprise` | yes | — | Enterprise slug. |
 | `github-token` | yes | — | Token with `enterprise:admin` scope. |
 | `okta-domain` | yes | — | Okta domain (e.g. `example.okta.com`, no scheme). |
-| `okta-token` | yes | — | Okta API token (`SSWS`) with rights to read group members. |
-| `okta-groups` | yes | — | Newline- or comma-separated Okta group IDs. |
+| `okta-token` | yes | — | Okta API token (`SSWS`) with rights to read app users. |
+| `okta-app-id` | yes | — | Okta application ID whose assigned users are the source of truth. |
 | `dry-run` | no | `true` | If `true`, only logs intended removals. Set to `false` to enforce. |
 | `email-domain-filter` | no | `""` | Optional comma-separated allowlist of email domains to consider when matching. |
 
@@ -26,6 +26,7 @@ Matching is performed on lowercased email addresses from the `github_com_verifie
 
 ## Behavior
 
+- Lists Okta app assignments via [`GET /api/v1/apps/{appId}/users`](https://developer.okta.com/docs/reference/api/apps/#list-users-assigned-to-application) (covers users assigned directly **and** via group push).
 - Iterates `consumed-licenses` paginated; only entries with `github_com_user == true` and `license_type == "enterprise"` are considered.
 - Users with **no** usable `github_com_verified_domain_emails` cause the run to fail after the report (so they are surfaced for manual triage).
 - Removal uses GraphQL: looks up the enterprise node ID via `enterprise(slug:)` and the user node ID via `user(login:)`, then calls `removeEnterpriseMember`.
@@ -34,8 +35,8 @@ Matching is performed on lowercased email addresses from the `github_com_verifie
 
 There is an unavoidable window between fetching the Okta snapshot, fetching GitHub membership, and issuing each removal. To bias toward preserving access, the action applies two layered checks immediately before each removal:
 
-1. **Refreshed Okta snapshot** — the Okta groups are re-fetched right before the removal phase. If a candidate's verified email now appears in the refreshed snapshot, removal is skipped.
-2. **Per-user authoritative re-check** — for each remaining candidate, the action calls `GET /api/v1/users?search=…` to find the Okta user, then `GET /api/v1/users/{id}/groups` to confirm they are not in any configured group.
+1. **Refreshed Okta snapshot** — the app's assigned users are re-fetched right before the removal phase. If a candidate's verified email now appears in the refreshed snapshot, removal is skipped.
+2. **Per-user authoritative re-check** — for each remaining candidate, the action calls `GET /api/v1/users?search=…` to resolve the Okta user, then `GET /api/v1/apps/{appId}/users/{userId}` to confirm they are not currently assigned to the app.
 
 Fail-safe: if the per-user re-check itself errors (Okta 5xx, rate limit, network), the user is **spared, not removed** (logged as a warning). All spared logins are reported in `drift-spared-logins` and in the job summary.
 
@@ -63,9 +64,7 @@ jobs:
           github-token: ${{ secrets.ENTERPRISE_ADMIN_PAT }}
           okta-domain: example.okta.com
           okta-token: ${{ secrets.OKTA_API_TOKEN }}
-          okta-groups: |
-            00g1abcd2EFG3hijK4l5
-            00g6mnop7QRS8tuvW9x0
+          okta-app-id: 0oa1abcd2EFG3hijK4l5
           dry-run: ${{ inputs.dry-run || 'true' }}
           email-domain-filter: example.com,corp.example.com
 ```

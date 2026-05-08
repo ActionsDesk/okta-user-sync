@@ -17,8 +17,8 @@ inputs:
   okta-token:
     description: Okta API token used to list group members.
     required: true
-  okta-groups:
-    description: Newline- or comma-separated list of Okta group IDs whose members are the source of truth.
+  okta-app-id:
+    description: Okta application ID whose assigned users are the source of truth.
     required: true
   dry-run:
     description: If "true" (default), report removals without performing them.
