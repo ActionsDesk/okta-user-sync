@@ -57,7 +57,7 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      - uses: lindluni/user-sync-okta@v1
+      - uses: actionsdesk/user-sync-okta@v1
         with:
           enterprise: my-enterprise
           github-token: ${{ secrets.ENTERPRISE_ADMIN_PAT }}
